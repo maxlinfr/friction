@@ -5,51 +5,68 @@ Instagram that gets quietly worse the longer you doomscroll: no popups, no block
 The app is a full-screen instagram.com with a script (`Friction/Resources/friction.js`) injected into every page.
 Friction only applies on **Reels, Explore and the home feed**. DMs, profiles and posting are never touched.
 
-| Mechanic | What the user feels | Ramp |
+| Mechanic | What the user feels | Fresh session → 30 min in |
 |---|---|---|
-| Slow pagination | feed "runs out" for a beat, like bad wifi | delay ≈ 600 ms × (1 + 0.06·min) |
-| Video start hold | reel sits on first frame like it's buffering | ≈ 350 ms at start → ~1 s at 30 min |
+| Loading screen | video hidden, tinted layer + spinner, buttons still visible | ~1.2 s (0.7 s min) → ~3 s |
+| Mid-video buffering | frame freezes with spinner, then continues | ~1 s every ~29 s → ~2.5 s every ~8 s |
+| Slow "load more" | feed runs out for a beat, like bad wifi | ~1 s → ~2.5 s |
 | Late audio | sound kicks in ~0.5 s after video (35% of reels) | random |
-| Colour drain | saturation creeps down after 5 min, floor 55% | −1.2%/min, 2 s fade back out |
-| Sticky swipes | some swipes spring back on Reels after 3 min | 2% → 15% |
+| Colour drain | saturation creeps down after 5 min, floor 55% | 100% → 70% |
+| Sticky swipes | some swipes spring back on Reels after 3 min | 0% → 14% |
 
 All delays are `base × intensity × (1 + αt) × ε`, with ε lognormal (mean 1), so it never feels mechanical.
 The session clock resets after 10 minutes away. Intensity (Off / Light / Normal / Strong) lives in **iOS Settings → Friction**.
 
-## Project layout
+## Status & roadmap
 
-```
-project.yml                 XcodeGen spec → generates Friction.xcodeproj
-Friction/FrictionApp.swift  app entry
-Friction/BrowserView.swift  WKWebView wrapper, script injection, link handling
-Friction/FrictionSettings.swift
-Friction/Resources/friction.js        the friction engine
-Friction/Resources/Settings.bundle    the iOS Settings pane
-.github/workflows/build.yml           builds an unsigned .ipa on a cloud Mac
-```
+- ✅ v1 app shell, friction engine, desktop + Safari userscript versions, experiment mode + analysis
+- ⏳ **Phase 1: feedback loop**: CI simulator screenshots, WebKit engine tests, userscript generator
+- ⏳ **Phase 2: TestFlight-ready**: bundle ID, icon, privacy manifest, CI upload
+- ⏳ **Phase 3: hub**: Instagram + YouTube Shorts
+- 🕓 **Later: Screen Time block + redirect** (waiting on Apple's Family Controls approval)
+
+Details and acceptance criteria: [CLAUDE.md](CLAUDE.md).
+
+## Working on this with Claude Code
+
+`CLAUDE.md` holds the standing project rules; Claude Code loads it every session.
+`.claude/skills/ci-loop/` is the build-review loop: push → GitHub's Mac builds → read failures and
+screenshots → fix → repeat. Requirements on your machine: **git**, **Node.js**, and the
+**GitHub CLI** (`winget install GitHub.cli`, then `gh auth login`).
 
 ## Getting it on your iPhone from Windows (free)
 
-You can't run Xcode on Windows, so GitHub's Macs build it and Sideloadly installs it.
+GitHub's Macs build it; Sideloadly installs it.
 
-1. Push this folder to a GitHub repo (public = unlimited free Mac minutes; private = ~200 Mac-minutes/month free, plenty for this).
-2. Open the repo's **Actions** tab, wait for the `build` run (~4 min), then download **Friction-unsigned-ipa** from the run's Artifacts.
-3. On Windows, install **iTunes** and **iCloud** (the apple.com versions, not the Microsoft Store ones), then **Sideloadly** (sideloadly.io).
-4. Plug in your iPhone, drag the .ipa into Sideloadly, and sign in with your Apple ID. It signs and installs the app.
-5. On the phone: **Settings → Privacy & Security → Developer Mode → On** (restart), then **Settings → General → VPN & Device Management** → trust your Apple ID.
+1. Push to GitHub. In the **Actions** tab, open the latest `build` run and download **Friction-unsigned-ipa**.
+2. On Windows install **iTunes** and **iCloud** from apple.com (not the Microsoft Store), then **Sideloadly** from sideloadly.io.
+3. **Use a spare Apple ID for signing**, not your main one. Create one at account.apple.com with a different email.
+   Your phone stays signed into your main account; the spare one is only ever typed into Sideloadly.
+4. Plug in the iPhone, drag the .ipa into Sideloadly, enter the spare Apple ID, Start.
+5. On the phone: **Settings → Privacy & Security → Developer Mode → On** (restart), then
+   **Settings → General → VPN & Device Management** → trust the spare account.
 
-With a free Apple ID the install expires after **7 days**; just re-run Sideloadly.
+Free signing expires after **7 days**; re-run Sideloadly (app data is kept).
+
+## Running it with friends (free, iPhone, no App Store)
+
+`testing/friction-friends.user.js` runs the same engine in iPhone Safari via the free
+**Userscripts** extension, in **experiment mode**: each day is randomly ON or OFF per person,
+and sessions are logged locally either way. Setup steps for friends: [FRIENDS.md](FRIENDS.md).
+Collect everyone's "Copy results" codes into `results.txt`, then run
+`python analysis/summarize.py results.txt` for per-person numbers, the average effect, and a
+permutation-test p-value. (The install link needs this repo to be public.)
 
 ## Shipping to other people
 
-1. **Apple Developer Program** ($99/yr): needed for TestFlight and the App Store.
-2. Set a real bundle ID in `project.yml` (e.g. `com.yourname.friction`), add an app icon (required for upload).
-3. Create the app in **App Store Connect**, then upload builds from CI using an App Store Connect API key (or use Codemagic, which handles signing + TestFlight with no Mac).
-4. **TestFlight**: share a link with up to 10,000 testers. Do this before App Store review.
-5. **App Store review**: don't use Instagram's name/logo in the app name, icon or screenshots. Lean on "digital wellbeing" framing.
-6. **v2 — Screen Time redirect** (sends you here when you open the real Instagram): needs the Family Controls entitlement, and Apple must approve a *distribution* request for it. Apply early; approval can take weeks.
+1. **Apple Developer Program** ($99/yr, one account covers every app).
+2. Phase 2 above, then create the app in **App Store Connect** and add testers.
+3. **TestFlight**: up to 100 internal testers by email (no review) or 10,000 external by link (quick beta review).
+4. **App Store review**: no Instagram name/logo in the app name, icon or screenshots; frame it as digital wellbeing.
+5. **Screen Time** needs Apple to approve a Family Controls *distribution* request for the app **and each extension**. Submit right after enrolling; extension approvals can take weeks.
 
 ## Debugging
 
-Turn on **Settings → Friction → Debug logging** to log every hold/spring-back. Instagram's web code changes often;
-if feed delays stop firing, the friendly-name regex `FEEDISH` in `friction.js` is the first thing to check.
+Turn on **Settings → Friction → Debug logging** to log every hold/stall/spring-back. On desktop, run
+`__friction.status()` in the console. Instagram's web code changes often; if feed delays stop firing,
+the friendly-name regex `FEEDISH` in `friction.js` is the first thing to check.
