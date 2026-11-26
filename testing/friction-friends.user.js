@@ -240,6 +240,20 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, experiment: true, debug: false };
     } catch (_) {}
   }
   syncSurfaceAttr();
+  // Some injectors run before <html> exists (document.documentElement === null), so the two
+  // calls above did nothing. Redo them the moment <html> is inserted, before anything renders;
+  // otherwise videos wouldn't be hidden until DOMContentLoaded / the first 1 s tick.
+  if (!document.documentElement) {
+    try {
+      const mo = new MutationObserver(() => {
+        if (!document.documentElement) return;
+        mo.disconnect();
+        try { ensureCss(); } catch (_) {}
+        syncSurfaceAttr();
+      });
+      mo.observe(document, { childList: true });
+    } catch (_) {}
+  }
   for (const fn of ['pushState', 'replaceState']) {
     try {
       const orig = history[fn];
