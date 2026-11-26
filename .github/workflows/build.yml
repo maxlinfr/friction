@@ -1,0 +1,36 @@
+# Builds an unsigned .ipa on a GitHub-hosted Mac on every push.
+# Download it from the run's "Artifacts" section, then sign + install with Sideloadly on Windows.
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build (unsigned, device)
+        run: |
+          xcodebuild -project Friction.xcodeproj -scheme Friction -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package .ipa
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/Friction.app Payload/
+          zip -qry Friction-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Friction-unsigned-ipa
+          path: Friction-unsigned.ipa
