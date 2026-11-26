@@ -1,14 +1,29 @@
-# Builds an unsigned .ipa on a GitHub-hosted Mac on every push.
-# Download it from the run's "Artifacts" section, then sign + install with Sideloadly on Windows.
+# One macOS job: unsigned device .ipa (for Sideloadly) + simulator build with screenshots.
+# Download artifacts from the run's "Artifacts" section.
+# macOS minutes are expensive (10x on private repos): keep this to ONE macOS job.
 name: build
 
 on:
   push:
+    paths-ignore:
+      - "**.md"
+      - "analysis/**"
+      - "testing/**"
+      - ".claude/**"
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  ipa:
+  # TODO(next): add a separate `engine-tests` job here, runs-on: ubuntu-latest:
+  #   npm ci; npx playwright install --with-deps webkit; npm run check:userscripts; npm test
+  # (do not put it on macOS)
+
+  ios:
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -34,3 +49,41 @@ jobs:
         with:
           name: Friction-unsigned-ipa
           path: Friction-unsigned.ipa
+
+      - name: Build (simulator)
+        run: |
+          xcodebuild -project Friction.xcodeproj -scheme Friction -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build-sim \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Boot simulator, install, launch, screenshot
+        run: |
+          mkdir -p screenshots
+          # Pick the first available iPhone (newest runtime listed last, so take the last).
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          c=[x["udid"] for rt,l in sorted(d.items()) if "iOS" in rt for x in l if x["name"].startswith("iPhone")]
+          print(c[-1] if c else "")')
+          if [ -z "$UDID" ]; then
+            echo "No iPhone simulator available"; xcrun simctl list devices available; exit 1
+          fi
+          echo "Using simulator $UDID"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" build-sim/Build/Products/Debug-iphonesimulator/Friction.app
+          xcrun simctl launch "$UDID" com.example.friction
+          for i in 1 2 3 4; do
+            sleep 12
+            xcrun simctl io "$UDID" screenshot "screenshots/shot-$i.png"
+          done
+          ls -l screenshots
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: screenshots/
+          if-no-files-found: warn
