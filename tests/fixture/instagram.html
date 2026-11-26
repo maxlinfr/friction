@@ -1,0 +1,64 @@
+<!doctype html>
+<!-- Fake instagram.com page for the engine tests. Served for every https://www.instagram.com/**
+     path by tests/helpers.js, so location.pathname is real (/reels/, /, /direct/inbox/ ...).
+     No external network: media and API endpoints are routed by the test too. -->
+<html lang="en">
+<head>
+<script>
+  // Runs while the page is still parsing: before DOMContentLoaded and before any engine timer
+  // (the test clock is paused). Records whether the engine had already hidden videos by then.
+  window.__early = {
+    readyState: document.readyState,
+    surfaceAttr: document.documentElement.hasAttribute('data-fr-v'),
+    hideCss: [...document.querySelectorAll('style')].some((s) => s.textContent.includes('video:not([data-fr-ok])')),
+  };
+</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fake Instagram</title>
+<style>
+  body { margin: 0; background: #000; color: #fff; font: 14px system-ui, sans-serif; }
+  video { display: block; width: 320px; height: 300px; background: #333; }
+</style>
+</head>
+<body>
+<main>
+  <video id="v1" src="/__fixture/media/1.wav" muted playsinline loop preload="auto"></video>
+  <video id="v2" src="/__fixture/media/2.wav" muted playsinline loop preload="auto"></video>
+</main>
+<script>
+  // Test API. Requests go through window.fetch / XMLHttpRequest *after* the engine has
+  // wrapped them, the way Instagram's own code would.
+  window.fx = {
+    plays: {},
+    // Calls video.play() like Instagram does and records how the returned promise settles.
+    play(id) {
+      const v = document.getElementById(id);
+      const st = (this.plays[id] = { state: 'pending' });
+      Promise.resolve(v.play()).then(
+        () => { st.state = 'resolved'; },
+        (e) => { st.state = 'rejected:' + (e && e.name); });
+    },
+    playState(id) { return this.plays[id] ? this.plays[id].state : 'none'; },
+    // GraphQL-style POST carrying the friendly name in the header and the body, like Instagram.
+    fetchNamed(name, url) {
+      fetch(url || '/graphql/query', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-fb-friendly-name': name },
+        body: 'fb_api_req_friendly_name=' + encodeURIComponent(name) + '&variables=%7B%7D',
+      }).catch(() => {});
+    },
+    xhrNamed(name, url) {
+      const x = new XMLHttpRequest();
+      x.open('POST', url || '/graphql/query');
+      x.setRequestHeader('content-type', 'application/x-www-form-urlencoded');
+      x.setRequestHeader('x-fb-friendly-name', name);
+      x.send('fb_api_req_friendly_name=' + encodeURIComponent(name));
+    },
+    // REST-style GET with no friendly name (e.g. /api/v1/feed/timeline/).
+    fetchUrl(url) { fetch(url).catch(() => {}); },
+    xhrUrl(url) { const x = new XMLHttpRequest(); x.open('GET', url); x.send(); },
+  };
+</script>
+</body>
+</html>
