@@ -1,0 +1,14 @@
+{
+  "name": "friction",
+  "private": true,
+  "description": "Friction engine tooling: userscript generator and Playwright WebKit tests.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "build:userscripts": "node scripts/build-userscripts.mjs",
+    "check:userscripts": "node scripts/build-userscripts.mjs --check"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1"
+  }
+}
