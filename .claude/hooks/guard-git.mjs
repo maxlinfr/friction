@@ -64,20 +64,6 @@ function main(input) {
     if (hit) out('deny', 'friction.js uses an HTML-string DOM API (CLAUDE.md rule 4, Trusted Types): ' + hit.trim().slice(0, 160));
   }
 
-  const tunables = (src) => {
-    if (src == null) return null;
-    src = src.replace(/\r\n/g, '\n');
-    const t = (src.match(/const T = \{[\s\S]*?\n\s*\};/) || [''])[0];
-    const a = (src.match(/const ALPHA\s*=\s*[^;]+;/) || [''])[0];
-    const s = (src.match(/const SIGMA\s*=\s*[^;]+;/) || [''])[0];
-    return [t, a, s].join('\n').replace(/\/\/.*$/gm, '').replace(/\s+/g, ' ').trim();
-  };
-  const headT = tunables(head);
-  if (headT != null && versions.some((v) => tunables(v) !== headT)) {
-    out('ask', 'The friction feel defaults (T / ALPHA / SIGMA in friction.js) differ from HEAD. ' +
-      'CLAUDE.md rule 7: the owner must approve feel changes. Approve only if you agreed to these numbers.');
-  }
-
   // --- secrets: staged + unstaged added lines, and untracked files that `git add -A` would pick up
   const SECRET = [
     /-----BEGIN ([A-Z]+ )?PRIVATE KEY-----/,
@@ -102,5 +88,20 @@ function main(input) {
   for (const l of added) {
     const re = SECRET.find((r) => r.test(l));
     if (re) out('deny', 'Possible secret in the changes being committed (matched ' + re + '). CLAUDE.md rule 5: secrets go in CI secrets only.');
+  }
+
+  // --- feel defaults: checked last, so any deny above always wins over this ask
+  const tunables = (src) => {
+    if (src == null) return null;
+    src = src.replace(/\r\n/g, '\n');
+    const t = (src.match(/const T = \{[\s\S]*?\n\s*\};/) || [''])[0];
+    const a = (src.match(/const ALPHA\s*=\s*[^;]+;/) || [''])[0];
+    const s = (src.match(/const SIGMA\s*=\s*[^;]+;/) || [''])[0];
+    return [t, a, s].join('\n').replace(/\/\/.*$/gm, '').replace(/\s+/g, ' ').trim();
+  };
+  const headT = tunables(head);
+  if (headT != null && versions.some((v) => tunables(v) !== headT)) {
+    out('ask', 'The friction feel defaults (T / ALPHA / SIGMA in friction.js) differ from HEAD. ' +
+      'CLAUDE.md rule 7: the owner must approve feel changes. Approve only if you agreed to these numbers.');
   }
 }
