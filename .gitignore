@@ -4,3 +4,10 @@ build/
 Payload/
 *.ipa
 .DS_Store
+ci-screens/
+node_modules/
+test-results/
+playwright-report/
+results.txt
+.claude/settings.local.json
+.claude/worktrees/
