@@ -5,6 +5,7 @@
 // @description  Test copy of Friction/Resources/friction.js for desktop Chrome. Regenerate if the engine changes.
 // @match        https://www.instagram.com/*
 // @run-at       document-start
+// @inject-into  page
 // @grant        none
 // ==/UserScript==
 
@@ -17,12 +18,29 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, debug: true };
 // Every hook is wrapped so a failure here can never break Instagram itself.
 (() => {
   if (window.__friction) return;
-  const CFG = Object.assign({ intensity: 1.0, debug: false }, window.__FRICTION_CONFIG__ || {});
+  const CFG = Object.assign({ intensity: 1.0, debug: false, experiment: false }, window.__FRICTION_CONFIG__ || {});
   window.__friction = { cfg: CFG };
-  const M = Number(CFG.intensity) || 0;
-  if (M <= 0) return;
-
   const now = () => Date.now();
+
+  // ------------------------------------------------------ experiment mode
+  // With experiment: true, each calendar day is randomly ON or OFF (50/50), fixed per
+  // person per day. Usage is logged on both kinds of day so they can be compared.
+  const lsGet = (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } };
+  const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
+  const today = () => {
+    const d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  };
+  const fnv = (str) => { let h = 2166136261; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
+  let deviceId = lsGet('__fr_id');
+  if (!deviceId) { deviceId = Math.random().toString(36).slice(2, 8); lsSet('__fr_id', deviceId); }
+  const BASE = Number(CFG.intensity) || 0;
+  const condition = CFG.experiment
+    ? (fnv(deviceId + '|' + today()) % 2 ? 'on' : 'off')
+    : (BASE > 0 ? 'on' : 'off');
+  const M = condition === 'on' ? BASE : 0;
+  const ACTIVE = M > 0;
+
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const log = (...a) => {
     if (!CFG.debug) return;
@@ -45,12 +63,26 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, debug: true };
   // A session ends after 10 minutes away from the app.
   const STORE = '__fr_session';
   const IDLE_RESET_MS = 10 * 60 * 1000;
+  // Finished sessions go to a local log: { d: day, c: 'on'|'off', s: seconds on
+  // Reels/Explore/feed, r: reels watched }. Nothing leaves the device unless the
+  // user copies it from the stats panel (instagram.com/#friction).
+  const LOG_KEY = '__fr_log';
+  const readLog = () => { try { return JSON.parse(lsGet(LOG_KEY)) || []; } catch (_) { return []; } };
+  function finalize(sess) {
+    if (!sess || !(sess.t >= 10)) return; // ignore sub-10-second visits
+    const lg = readLog();
+    lg.push({ d: sess.day || today(), c: sess.cond || condition, s: sess.t, r: sess.reels || 0 });
+    while (lg.length > 1000) lg.shift();
+    lsSet(LOG_KEY, JSON.stringify(lg));
+  }
+  const freshSession = () => ({ t: 0, last: now(), day: today(), cond: condition, reels: 0 });
   let s = (() => {
     try {
-      const v = JSON.parse(localStorage.getItem(STORE));
-      if (v && now() - v.last < IDLE_RESET_MS) return v;
+      const v = JSON.parse(lsGet(STORE));
+      if (v && now() - v.last < IDLE_RESET_MS && (v.cond || condition) === condition) return v;
+      if (v) finalize(v);
     } catch (_) {}
-    return { t: 0, last: now() };
+    return freshSession();
   })();
   const minutes = () => s.t / 60;
 
@@ -61,7 +93,7 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, debug: true };
   function status() {
     const t = minutes();
     return {
-      surface: surface(), minutes: +t.toFixed(1), intensity: M,
+      surface: surface(), minutes: +t.toFixed(1), intensity: M, condition, experiment: !!CFG.experiment,
       avgVideoStartMs: Math.round(T.videoStart.base * M * (1 + ALPHA * t)),
       avgFeedHoldMs: Math.round(T.feedHold.base * M * (1 + ALPHA * t)),
       avgStallMs: Math.round(T.stall.base * M * (1 + ALPHA * t)),
@@ -74,11 +106,12 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, debug: true };
   setInterval(() => {
     try {
       if (document.visibilityState !== 'visible') return;
-      if (now() - s.last > IDLE_RESET_MS) s.t = 0;
+      if (now() - s.last > IDLE_RESET_MS) { finalize(s); s = freshSession(); }
       if (surface()) s.t += 1;
       s.last = now();
-      localStorage.setItem(STORE, JSON.stringify(s));
+      lsSet(STORE, JSON.stringify(s));
       applyVisuals();
+      syncSurfaceAttr();
     } catch (_) {}
   }, 1000);
 
@@ -95,6 +128,8 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, debug: true };
     stallRate0: 0.035,  // stalls per second of playback at t = 0  (≈ one every ~30 s)
     stallRateK: 0.003,  // + per minute of session
     stallRateMax: 0.12, // ≈ one every ~8 s at worst
+    loadingTint: 0.25,  // darkness of the layer over a loading video (0 = clear, 1 = black)
+    bufferTint: 0.18,   // darkness over a buffering (frozen) video
   };
   window.__friction.T = T; // live-tweak from the console, e.g. __friction.T.videoStart.base = 1500
 
@@ -135,7 +170,7 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, debug: true };
     return '';
   };
   const isFeedRequest = (url, name) => {
-    if (!surface()) return false;
+    if (!ACTIVE || !surface()) return false;
     if (name) return FEEDISH.test(name) && !/mutation/i.test(name);
     return API_FEED.test(String(url || ''));
   };
@@ -186,47 +221,118 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, debug: true };
   function ensureCss() {
     if (cssReady) return;
     const st = document.createElement('style');
-    st.textContent = '@keyframes __frspin{to{transform:rotate(360deg)}}';
+    st.textContent = '@keyframes __frspin{to{transform:rotate(360deg)}}' +
+      // On Reels/feed, a video stays invisible until friction releases it. That stops
+      // the preloaded next reel from flashing on screen before its loading hold begins.
+      'html[data-fr-v] video:not([data-fr-ok]){opacity:0 !important}';
     (document.head || document.documentElement).appendChild(st);
     cssReady = true;
   }
+  try { ensureCss(); } catch (_) { document.addEventListener('DOMContentLoaded', () => { try { ensureCss(); } catch (_) {} }); }
+
+  // Keep <html data-fr-v> in sync with whether we're on a video surface.
+  function syncSurfaceAttr() {
+    try {
+      const s = surface();
+      document.documentElement.toggleAttribute('data-fr-v', ACTIVE && (s === 'reels' || s === 'feed'));
+    } catch (_) {}
+  }
+  syncSurfaceAttr();
+  for (const fn of ['pushState', 'replaceState']) {
+    try {
+      const orig = history[fn];
+      history[fn] = function () { const r = orig.apply(this, arguments); syncSurfaceAttr(); return r; };
+    } catch (_) {}
+  }
+  addEventListener('popstate', syncSurfaceAttr);
+
+  // A reused <video> that gets a new source must be hidden again until released.
+  const resetOk = (e) => {
+    const el = e.target;
+    if (el instanceof HTMLMediaElement && released.get(el) !== srcOf(el)) el.removeAttribute('data-fr-ok');
+  };
+  document.addEventListener('emptied', resetOk, true);
+  document.addEventListener('loadstart', resetOk, true);
+  // Thin rotating arc: a ring with a gap, spinning smoothly, like Instagram's
+  // current video loading indicator.
   function makeSpinner() {
     const svg = document.createElementNS(SVGNS, 'svg');
-    svg.setAttribute('viewBox', '0 0 100 100');
-    svg.setAttribute('width', '32');
-    svg.setAttribute('height', '32');
-    svg.style.animation = '__frspin 0.9s steps(12) infinite';
-    for (let i = 0; i < 12; i++) {
-      const r = document.createElementNS(SVGNS, 'rect');
-      r.setAttribute('x', '46'); r.setAttribute('y', '6');
-      r.setAttribute('width', '8'); r.setAttribute('height', '26'); r.setAttribute('rx', '4');
-      r.setAttribute('fill', '#dbdbdb');
-      r.setAttribute('opacity', String((i + 1) / 12));
-      r.setAttribute('transform', `rotate(${i * 30} 50 50)`);
-      svg.appendChild(r);
-    }
+    svg.setAttribute('viewBox', '0 0 48 48');
+    svg.setAttribute('width', '36');
+    svg.setAttribute('height', '36');
+    svg.style.animation = '__frspin 0.8s linear infinite';
+    const c = document.createElementNS(SVGNS, 'circle');
+    c.setAttribute('cx', '24'); c.setAttribute('cy', '24'); c.setAttribute('r', '20');
+    c.setAttribute('fill', 'none');
+    c.setAttribute('stroke', '#fff');
+    c.setAttribute('stroke-opacity', '0.9');
+    c.setAttribute('stroke-width', '3');
+    c.setAttribute('stroke-linecap', 'round');
+    c.setAttribute('stroke-dasharray', '88 38'); // ~70% of the ring drawn, ~30% gap
+    svg.appendChild(c);
     return svg;
   }
   // blackout=true: pure loading screen (no image). false: frozen frame, slightly dimmed.
+  // The overlay is position:fixed on <body> and tracks the video's on-screen box every
+  // frame. Being outside Instagram's own layers means nothing they stack over the video
+  // (preview thumbnails etc.) can cover it.
+  const overlays = new Set();
   function showOverlay(el, blackout) {
     try {
       hideOverlay(el);
-      const parent = el.parentElement;
-      if (!parent) return;
       ensureCss();
-      if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
+      const host = document.body || document.documentElement;
       const o = document.createElement('div');
-      o.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;' +
-        'justify-content:center;pointer-events:none;background:' + (blackout ? '#000' : 'rgba(0,0,0,0.18)');
+      o.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:2147483646;' +
+        'display:flex;align-items:center;justify-content:center;pointer-events:none;' +
+        'background:rgba(0,0,0,' + (blackout ? T.loadingTint : T.bufferTint) + ')';
       o.appendChild(makeSpinner());
-      el.insertAdjacentElement('afterend', o);
+      host.appendChild(o);
       el.__frOverlay = o;
-    } catch (_) {}
+      overlays.add(el);
+      position(el);
+      log('overlay', blackout ? 'loading' : 'buffer', JSON.stringify(rectOf(el)));
+      if (overlays.size === 1) requestAnimationFrame(track);
+    } catch (e) { log('overlay error', e && e.message); }
+  }
+  function rectOf(el) {
+    const r = el.getBoundingClientRect();
+    return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
+  }
+  function position(el) {
+    const o = el.__frOverlay;
+    if (!o) return;
+    const r = el.getBoundingClientRect();
+    const visible = r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight;
+    o.style.display = visible ? 'flex' : 'none';
+    o.style.left = r.left + 'px'; o.style.top = r.top + 'px';
+    o.style.width = r.width + 'px'; o.style.height = r.height + 'px';
+  }
+  function track() {
+    for (const el of overlays) {
+      if (!el.__frOverlay || !el.isConnected) { hideOverlay(el); continue; }
+      position(el);
+    }
+    if (overlays.size) requestAnimationFrame(track);
   }
   function hideOverlay(el) {
     try { if (el.__frOverlay) el.__frOverlay.remove(); } catch (_) {}
     el.__frOverlay = null;
+    overlays.delete(el);
   }
+
+  // Console self-test: covers the biggest on-screen video with the loading screen for 3 s.
+  window.__friction.testOverlay = () => {
+    const vids = [...document.querySelectorAll('video')]
+      .map((v) => [v, v.getBoundingClientRect()])
+      .filter(([, r]) => r.width > 0 && r.bottom > 0 && r.top < innerHeight)
+      .sort((a, b) => b[1].width * b[1].height - a[1].width * a[1].height);
+    if (!vids.length) return 'no visible <video> on this page';
+    const v = vids[0][0];
+    showOverlay(v, true);
+    setTimeout(() => hideOverlay(v), 3000);
+    return { videosOnPage: document.querySelectorAll('video').length, covering: rectOf(v) };
+  };
 
   // ------------------------------------------------ 2. delayed video start
   // Each new video shows a black loading screen with a spinner first.
@@ -253,8 +359,9 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, debug: true };
     MP.play = function () {
       const el = this;
       try {
-        if (!videoSurface()) return origPlay.apply(el, arguments);
+        if (!ACTIVE || !videoSurface()) { el.setAttribute('data-fr-ok', ''); return origPlay.apply(el, arguments); }
         if (released.get(el) === srcOf(el)) {
+          el.setAttribute('data-fr-ok', '');
           const p = origPlay.apply(el, arguments);
           scheduleStall(el);
           return p;
@@ -268,6 +375,7 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, debug: true };
           el.__frPending = null;
           if (el.__frTok !== tok || !el.isConnected) { hideOverlay(el); return; } // swiped away
           released.set(el, srcOf(el));
+          el.setAttribute('data-fr-ok', '');
           hideOverlay(el);
           return Promise.resolve(origPlay.call(el)).then(() => { lateAudio(el); scheduleStall(el); });
         });
@@ -281,7 +389,7 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, debug: true };
     document.addEventListener('play', (e) => {
       try {
         const el = e.target;
-        if (!(el instanceof HTMLMediaElement) || !videoSurface()) return;
+        if (!ACTIVE || !(el instanceof HTMLMediaElement) || !videoSurface()) return;
         if (released.get(el) === srcOf(el) || el.__frPending) return;
         el.pause();
         el.play();
@@ -399,5 +507,96 @@ window.__FRICTION_CONFIG__ = { intensity: 1.0, debug: true };
     lastTop = top;
   }
 
-  log('friction loaded, intensity', M, 'session min', minutes().toFixed(1));
+  // ------------------------------------------------------- reels counter
+  // Counts distinct reels that actually started playing (on ON and OFF days alike).
+  const counted = new WeakMap();
+  document.addEventListener('playing', (e) => {
+    try {
+      const el = e.target;
+      if (!(el instanceof HTMLMediaElement) || surface() !== 'reels') return;
+      const k = el.currentSrc || el.src || '';
+      if (counted.get(el) === k) return;
+      counted.set(el, k);
+      s.reels = (s.reels || 0) + 1;
+    } catch (_) {}
+  }, true);
+
+  // ---------------------------------------------------------- stats panel
+  // Open instagram.com/#friction to see your numbers and copy them to share.
+  function summary() {
+    const lg = readLog();
+    if (s.t >= 10) lg.push({ d: s.day, c: s.cond, s: s.t, r: s.reels || 0, live: true });
+    const agg = (c) => {
+      const xs = lg.filter((x) => x.c === c);
+      const days = new Set(xs.map((x) => x.d)).size;
+      const sec = xs.reduce((a, x) => a + x.s, 0), reels = xs.reduce((a, x) => a + x.r, 0);
+      return {
+        days, sessions: xs.length,
+        minPerDay: days ? +(sec / 60 / days).toFixed(1) : 0,
+        minPerSession: xs.length ? +(sec / 60 / xs.length).toFixed(1) : 0,
+        reelsPerDay: days ? +(reels / days).toFixed(1) : 0,
+      };
+    };
+    return { id: deviceId, today: condition, on: agg('on'), off: agg('off'), log: lg };
+  }
+  window.__friction.stats = () => { const x = summary(); delete x.log; return x; };
+
+  function exportCode() {
+    const x = summary();
+    const compact = x.log.map((e) => [e.d, e.c === 'on' ? 1 : 0, Math.round(e.s), e.r]);
+    return 'FR1:' + btoa(JSON.stringify({ id: x.id, v: 1, l: compact }));
+  }
+
+  let panel = null;
+  function mk(tag, css, text) {
+    const n = document.createElement(tag);
+    if (css) n.style.cssText = css;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function openPanel() {
+    try {
+      if (panel || !document.body) return;
+      const x = summary();
+      panel = mk('div', 'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.55);' +
+        'display:flex;align-items:center;justify-content:center;font:15px -apple-system,system-ui,sans-serif');
+      const card = mk('div', 'background:#fff;color:#111;border-radius:16px;padding:20px;width:min(340px,88vw);' +
+        'box-shadow:0 10px 40px rgba(0,0,0,.3)');
+      card.appendChild(mk('div', 'font-weight:700;font-size:18px;margin-bottom:4px', 'Friction stats'));
+      card.appendChild(mk('div', 'color:#666;font-size:13px;margin-bottom:14px',
+        CFG.experiment ? `ID ${x.id} · today is an ${x.today.toUpperCase()} day` : `ID ${x.id} · friction ${x.today}`));
+      const row = (label, a, b) => {
+        const r = mk('div', 'display:grid;grid-template-columns:1.6fr 1fr 1fr;padding:6px 0;border-bottom:1px solid #eee');
+        r.appendChild(mk('div', 'color:#555', label));
+        r.appendChild(mk('div', 'text-align:right;font-weight:600', String(a)));
+        r.appendChild(mk('div', 'text-align:right;font-weight:600', String(b)));
+        card.appendChild(r);
+      };
+      row('', 'ON', 'OFF');
+      row('Days', x.on.days, x.off.days);
+      row('Doomscroll min / day', x.on.minPerDay, x.off.minPerDay);
+      row('Min / session', x.on.minPerSession, x.off.minPerSession);
+      row('Reels / day', x.on.reelsPerDay, x.off.reelsPerDay);
+      const btns = mk('div', 'display:flex;gap:10px;margin-top:16px');
+      const copy = mk('button', 'flex:1;padding:11px;border:0;border-radius:10px;background:#0095f6;color:#fff;font-weight:600;font-size:15px', 'Copy results');
+      const close = mk('button', 'flex:1;padding:11px;border:0;border-radius:10px;background:#efefef;color:#111;font-weight:600;font-size:15px', 'Close');
+      copy.onclick = async () => {
+        const code = exportCode();
+        try { await navigator.clipboard.writeText(code); copy.textContent = 'Copied ✓'; }
+        catch (_) { prompt('Copy this and send it over:', code); }
+      };
+      close.onclick = () => { closePanel(); try { history.replaceState(null, '', location.pathname + location.search); } catch (_) {} };
+      btns.appendChild(copy); btns.appendChild(close); card.appendChild(btns);
+      panel.appendChild(card);
+      document.body.appendChild(panel);
+    } catch (e) { log('panel error', e && e.message); }
+  }
+  function closePanel() { try { if (panel) panel.remove(); } catch (_) {} panel = null; }
+  const checkHash = () => { if (location.hash === '#friction') openPanel(); };
+  addEventListener('hashchange', checkHash);
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(checkHash, 300));
+  else setTimeout(checkHash, 300);
+  window.__friction.panel = openPanel;
+
+  log('friction loaded, intensity', M, 'condition', condition, 'session min', minutes().toFixed(1));
 })();
