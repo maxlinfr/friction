@@ -13,7 +13,8 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const log = (...a) => {
     if (!CFG.debug) return;
-    try { window.webkit.messageHandlers.friction.postMessage(a.map(String).join(' ')); } catch (_) {}
+    try { window.webkit.messageHandlers.friction.postMessage(a.map(String).join(' ')); }
+    catch (_) { console.log('%c[friction]', 'color:#c60', ...a); } // desktop browser testing
   };
 
   // ---------------------------------------------------------------- surfaces
@@ -40,6 +41,23 @@
   })();
   const minutes = () => s.t / 60;
 
+  // Testing hooks (console): __friction.setMinutes(30) jumps the session clock,
+  // __friction.status() shows where you are on every ramp.
+  window.__friction.setMinutes = (m) => { s.t = m * 60; s.last = now(); applyVisuals(); return status(); };
+  window.__friction.status = () => status();
+  function status() {
+    const t = minutes();
+    return {
+      surface: surface(), minutes: +t.toFixed(1), intensity: M,
+      avgVideoStartMs: Math.round(T.videoStart.base * M * (1 + ALPHA * t)),
+      avgFeedHoldMs: Math.round(T.feedHold.base * M * (1 + ALPHA * t)),
+      avgStallMs: Math.round(T.stall.base * M * (1 + ALPHA * t)),
+      secondsBetweenStalls: +(1 / (Math.min(T.stallRateMax, T.stallRate0 + T.stallRateK * t) * M)).toFixed(1),
+      saturation: +(surface() ? Math.max(0.55, 1 - 0.012 * M * Math.max(0, t - 5)) : 1).toFixed(2),
+      springBackChance: t > 3 ? +(Math.min(0.15, 0.02 + 0.004 * t) * M).toFixed(3) : 0,
+    };
+  }
+
   setInterval(() => {
     try {
       if (document.visibilityState !== 'visible') return;
@@ -52,19 +70,31 @@
   }, 1000);
 
   // ---------------------------------------------------------------- sampling
-  // d = base * M * (1 + ALPHA*t) * eps,  eps ~ LogNormal(-SIGMA^2/2, SIGMA^2)  (mean 1)
-  const ALPHA = 0.06; // per minute: +6% per minute on a friction surface
-  const SIGMA = 0.5;
+  // d = base * M * (1 + ALPHA*t) * eps,  eps ~ LogNormal(-sigma^2/2, sigma^2)  (mean 1)
+  const ALPHA = 0.05; // per minute on a friction surface
+  const SIGMA = 0.4;
+
+  // All tunables in one place.
+  const T = {
+    videoStart: { base: 1200, floor: 700, cap: 5000 }, // black screen + spinner before each video
+    feedHold:   { base: 1000, floor: 300, cap: 5000 }, // "loading more" pause
+    stall:      { base: 1000, floor: 450, cap: 4000 }, // mid-video buffering
+    stallRate0: 0.035,  // stalls per second of playback at t = 0  (≈ one every ~30 s)
+    stallRateK: 0.003,  // + per minute of session
+    stallRateMax: 0.12, // ≈ one every ~8 s at worst
+  };
+  window.__friction.T = T; // live-tweak from the console, e.g. __friction.T.videoStart.base = 1500
+
   const gauss = () => {
     let u = 0, v = 0;
     while (!u) u = Math.random();
     while (!v) v = Math.random();
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
   };
-  const delay = (base, cap) => {
-    const eps = Math.exp(SIGMA * gauss() - (SIGMA * SIGMA) / 2);
+  const delay = ({ base, floor = 0, cap }, sigma = SIGMA) => {
+    const eps = Math.exp(sigma * gauss() - (sigma * sigma) / 2);
     const d = base * M * (1 + ALPHA * minutes()) * eps;
-    return Math.max(0, Math.min(cap * M, d));
+    return Math.max(floor * M, Math.min(cap * M, d));
   };
 
   // ------------------------------------------------- 1. slow feed pagination
@@ -105,7 +135,7 @@
         const url = typeof input === 'string' ? input : input && input.url;
         const name = nameFromHeaders(init && init.headers) || nameFromBody(init && init.body);
         if (isFeedRequest(url, name)) {
-          const d = delay(600, 4000);
+          const d = delay(T.feedHold);
           log('net hold', d | 0, name || url);
           return sleep(d).then(() => origFetch.apply(this, args));
         }
@@ -124,7 +154,7 @@
       try {
         const name = this.__frName || nameFromBody(body);
         if (isFeedRequest(this.__frUrl, name)) {
-          const d = delay(600, 4000);
+          const d = delay(T.feedHold);
           log('xhr hold', d | 0, name || this.__frUrl);
           setTimeout(() => { try { xSend.call(this, body); } catch (_) {} }, d);
           return;
@@ -134,33 +164,99 @@
     };
   } catch (_) {}
 
+  // ------------------------------------------- spinner / loading overlay
+  // A neutral activity spinner drawn with DOM APIs (no innerHTML, so it works under
+  // Trusted Types CSP). Inserted right after the <video> so it covers the video but
+  // sits under Instagram's own buttons/caption layers.
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  let cssReady = false;
+  function ensureCss() {
+    if (cssReady) return;
+    const st = document.createElement('style');
+    st.textContent = '@keyframes __frspin{to{transform:rotate(360deg)}}';
+    (document.head || document.documentElement).appendChild(st);
+    cssReady = true;
+  }
+  function makeSpinner() {
+    const svg = document.createElementNS(SVGNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 100 100');
+    svg.setAttribute('width', '32');
+    svg.setAttribute('height', '32');
+    svg.style.animation = '__frspin 0.9s steps(12) infinite';
+    for (let i = 0; i < 12; i++) {
+      const r = document.createElementNS(SVGNS, 'rect');
+      r.setAttribute('x', '46'); r.setAttribute('y', '6');
+      r.setAttribute('width', '8'); r.setAttribute('height', '26'); r.setAttribute('rx', '4');
+      r.setAttribute('fill', '#dbdbdb');
+      r.setAttribute('opacity', String((i + 1) / 12));
+      r.setAttribute('transform', `rotate(${i * 30} 50 50)`);
+      svg.appendChild(r);
+    }
+    return svg;
+  }
+  // blackout=true: pure loading screen (no image). false: frozen frame, slightly dimmed.
+  function showOverlay(el, blackout) {
+    try {
+      hideOverlay(el);
+      const parent = el.parentElement;
+      if (!parent) return;
+      ensureCss();
+      if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
+      const o = document.createElement('div');
+      o.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;' +
+        'justify-content:center;pointer-events:none;background:' + (blackout ? '#000' : 'rgba(0,0,0,0.18)');
+      o.appendChild(makeSpinner());
+      el.insertAdjacentElement('afterend', o);
+      el.__frOverlay = o;
+    } catch (_) {}
+  }
+  function hideOverlay(el) {
+    try { if (el.__frOverlay) el.__frOverlay.remove(); } catch (_) {}
+    el.__frOverlay = null;
+  }
+
   // ------------------------------------------------ 2. delayed video start
-  // Each new video sits on its first frame for a moment, like it's buffering.
+  // Each new video shows a black loading screen with a spinner first.
   // Keyed by src because Instagram reuses <video> elements as you scroll.
   const released = new WeakMap(); // el -> src allowed to play
   const srcOf = (el) => el.currentSrc || el.src || '';
+  const videoSurface = () => { const s = surface(); return s === 'reels' || s === 'feed'; };
+  let origPlay, origPause;
+
   try {
     const MP = HTMLMediaElement.prototype;
-    const origPlay = MP.play, origPause = MP.pause;
+    origPlay = MP.play;
+    origPause = MP.pause;
 
     MP.pause = function () {
-      this.__frTok = (this.__frTok || 0) + 1; // cancels any pending held play
+      this.__frTok = (this.__frTok || 0) + 1; // cancels any pending hold / stall
+      clearTimeout(this.__frStallT);
+      this.__frStallPaused = false; // never auto-resume a video the user paused
+      endStall(this);
+      hideOverlay(this);
       return origPause.apply(this, arguments);
     };
 
     MP.play = function () {
       const el = this;
       try {
-        if (!surface() || released.get(el) === srcOf(el)) return origPlay.apply(el, arguments);
+        if (!videoSurface()) return origPlay.apply(el, arguments);
+        if (released.get(el) === srcOf(el)) {
+          const p = origPlay.apply(el, arguments);
+          scheduleStall(el);
+          return p;
+        }
         if (el.__frPending) return el.__frPending;
         const tok = (el.__frTok = (el.__frTok || 0) + 1);
-        const d = delay(350, 2500);
-        log('video hold', d | 0);
+        const d = delay(T.videoStart);
+        log('video start hold', d | 0);
+        showOverlay(el, true);
         el.__frPending = sleep(d).then(() => {
           el.__frPending = null;
-          if (el.__frTok !== tok || !el.isConnected) return; // swiped away meanwhile
+          if (el.__frTok !== tok || !el.isConnected) { hideOverlay(el); return; } // swiped away
           released.set(el, srcOf(el));
-          return Promise.resolve(origPlay.call(el)).then(() => lateAudio(el));
+          hideOverlay(el);
+          return Promise.resolve(origPlay.call(el)).then(() => { lateAudio(el); scheduleStall(el); });
         });
         return el.__frPending;
       } catch (_) {
@@ -172,13 +268,59 @@
     document.addEventListener('play', (e) => {
       try {
         const el = e.target;
-        if (!(el instanceof HTMLMediaElement) || !surface()) return;
+        if (!(el instanceof HTMLMediaElement) || !videoSurface()) return;
         if (released.get(el) === srcOf(el) || el.__frPending) return;
         el.pause();
         el.play();
       } catch (_) {}
     }, true);
   } catch (_) {}
+
+  // ------------------------------------------- 6. mid-video buffering
+  // Stalls arrive as a Poisson process over playback time; the rate rises with the
+  // session. Uses playbackRate = 0 (no 'pause' event, so Instagram doesn't show its
+  // paused UI); falls back to a real pause if the browser rejects rate 0.
+  function scheduleStall(el) {
+    try {
+      clearTimeout(el.__frStallT);
+      if (!videoSurface()) return;
+      const lam = Math.min(T.stallRateMax, T.stallRate0 + T.stallRateK * minutes()) * M; // per second
+      if (lam <= 0) return;
+      const wait = Math.max(2500, (-Math.log(1 - Math.random()) / lam) * 1000);
+      const tok = el.__frTok, key = srcOf(el);
+      el.__frStallT = setTimeout(() => stall(el, tok, key), wait);
+    } catch (_) {}
+  }
+
+  function stall(el, tok, key) {
+    try {
+      if (el.__frTok !== tok || srcOf(el) !== key) return;
+      if (!el.isConnected || el.paused || el.ended || !videoSurface()) return;
+      el.__frPrevRate = el.playbackRate || 1;
+      el.__frStalling = true;
+      el.__frStallPaused = false;
+      try { el.playbackRate = 0; } catch (_) {}
+      if (el.playbackRate !== 0) { el.__frStallPaused = true; origPause.call(el); }
+      showOverlay(el, false);
+      const d = delay(T.stall);
+      log('stall', d | 0);
+      setTimeout(() => {
+        if (el.__frTok !== tok) return; // user paused or video changed; pause() cleaned up
+        endStall(el);
+        hideOverlay(el);
+        scheduleStall(el);
+      }, d);
+    } catch (_) {}
+  }
+
+  function endStall(el) {
+    if (!el.__frStalling) return;
+    el.__frStalling = false;
+    try {
+      if (el.__frStallPaused) { el.__frStallPaused = false; origPlay.call(el); }
+      else el.playbackRate = el.__frPrevRate || 1;
+    } catch (_) {}
+  }
 
   // ---------------------------------------------- 5. audio arrives late
   function lateAudio(el) {
@@ -189,7 +331,7 @@
       setTimeout(() => {
         if (el.__frMuting) el.muted = false; // skip if the user touched mute meanwhile
         el.__frMuting = false;
-      }, delay(400, 1200));
+      }, delay({ base: 400, cap: 1200 }));
     } catch (_) {}
   }
   document.addEventListener('volumechange', (e) => {
