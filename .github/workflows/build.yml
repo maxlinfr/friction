@@ -8,7 +8,6 @@ on:
     paths-ignore:
       - "**.md"
       - "analysis/**"
-      - "testing/**"
       - ".claude/**"
   workflow_dispatch:
 
@@ -17,11 +16,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # TODO(next): add a separate `engine-tests` job here, runs-on: ubuntu-latest:
-  #   npm ci; npx playwright install --with-deps webkit; npm run check:userscripts; npm test
-  # (do not put it on macOS)
+  # Decide whether the app bundle is affected. Only Friction/** (includes friction.js, which is
+  # bundled), project.yml and the workflows need the macOS job; tests/scripts/npm changes don't.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            app:
+              - 'Friction/**'
+              - 'project.yml'
+              - '.github/workflows/**'
+
+  engine-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check:userscripts
+      - run: npx playwright install --with-deps webkit
+      - run: npm test # CI=true -> forbidOnly + html report
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
 
   ios:
+    needs: changes
+    if: needs.changes.outputs.app == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 30
     steps:
